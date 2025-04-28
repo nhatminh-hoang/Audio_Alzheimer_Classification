@@ -8,7 +8,6 @@ from torch.nn.modules.batchnorm import _BatchNorm
 
 from models.base_model import *  # Import your model
 from data_preprocessing import *  # Import your data loading function
-from scripts.optimizer import *
 
 MODEL = {
     'MLP': MLPModel,
@@ -233,6 +232,12 @@ def main():
     # Disable torch.compile if running on CPU or if CUDA capabilities are limited
     USE_COMPILE = device.type == 'cuda' and torch.cuda.get_device_capability()[0] >= 10
 
+    if not os.path.exists(SAVED_PATH):
+        os.makedirs(SAVED_PATH, exist_ok=True)
+    
+    if not os.path.exists('./config/experiment_configs'):
+        os.makedirs('./config/experiment_configs', exist_ok=True)
+
     # Getting arguments to create the new config 
     parser = argparse.ArgumentParser(description='Train a model')
     parser.add_argument('--data_name', type=str, help='Name of the dataset', default='ADReSS2020')
@@ -288,7 +293,7 @@ def main():
     train_loader, val_loader, test_loader = create_dataloader(data_type=config['data_type'],
                                                               data_name=config['data_name'],
                                                               wave_type=config['wave_type'],
-                                                              audio_feature_type=config['audio_type'],
+                                                              audio_feature_type=audio_type,
                                                               text_type=config['text_type'],
                                                               text_feature_type=config['text_feature'],
                                                               batch_size=config['batch_size'])
@@ -313,11 +318,6 @@ def main():
         optimizer = optim.Adam(model.parameters(), lr=config['lr'])
     elif config['optimizer'] == 'SGD':
         optimizer = optim.SGD(model.parameters(), lr=config['lr'])
-    elif config['optimizer'] == 'SAM':
-        base_optimizer = torch.optim.SGD 
-        optimizer = SAM(model.parameters(), base_optimizer=base_optimizer, momentum=0.9)
-    else:
-        raise ValueError(f"Optimizer {config['optimizer']} not found")
 
     criterion = nn.BCELoss()
 

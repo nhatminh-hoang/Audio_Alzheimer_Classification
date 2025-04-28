@@ -180,8 +180,8 @@ class ADreSS2020Dataset(Dataset):
             del features, segmented_data, segmented_labels
 
             # Save the preprocessed data
-            np.save(ADReSS2020_DATAPATH + '/preprocessed/' + 'mfcc_X_train.npy', X)
-            np.save(ADReSS2020_DATAPATH + '/preprocessed/' + 'mfcc_y_train.npy', y)
+            np.save(ADReSS2020_DATAPATH + '/preprocessed/' + self.X_name, X)
+            np.save(ADReSS2020_DATAPATH + '/preprocessed/' + self.y_name, y)
 
         elif self.split == 'test':
             segmented_test_data, segmented_test_labels = prepare_test_data(audio_files, labels)
@@ -372,7 +372,7 @@ def create_dataloader(data_name, data_type, batch_size=32,
 
     Args:
         data_name (str): Name of the dataset to load.
-        data_type (str): Type of data to load (e.g., 'train', 'test').
+        data_type (str): Type of data to load (e.g., 'audio', 'text').
         batch_size (int): Batch size for the DataLoader.
         text_type (str): Type of text feature to use (e.g., 'full', 'sum').
         text_feature_type (str): Type of text feature to use (e.g., 'modernbert-base', 'modernbert-large').
@@ -403,7 +403,7 @@ def create_dataloader(data_name, data_type, batch_size=32,
 if __name__ == "__main__":
     start = time.time()
 
-    train_loader, val_loader, test_loader = create_dataloader('ADReSS2020', data_type='text', text_type='full', text_feature_type='modernbert-base', batch_size=32)
+    train_loader, val_loader, test_loader = create_dataloader('ADReSS2020', data_type='audio', audio_feature_type='mfcc', wave_type='full', batch_size=32)
 
     print("Time taken: ", f'{time.time() - start:.2f} seconds')
     start = time.time()
