@@ -196,8 +196,8 @@ class ADreSS2020Dataset(Dataset):
             del features_test, segmented_test_data, segmented_test_labels
 
             # Save the preprocessed data
-            np.save(ADReSS2020_DATAPATH + '/preprocessed/' + 'mfcc_X_test.npy', X)
-            np.save(ADReSS2020_DATAPATH + '/preprocessed/' + 'mfcc_y_test.npy', y)
+            np.save(ADReSS2020_DATAPATH + '/preprocessed/' + self.X_name, X)
+            np.save(ADReSS2020_DATAPATH + '/preprocessed/' + self.y_name, y)
 
         return X, y
     
