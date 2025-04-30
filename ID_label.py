@@ -1,14 +1,7 @@
 import os
-from tqdm import tqdm
 import pandas as pd
-import numpy as np
-import torch
-import torchaudio
-import torchaudio.transforms as T
-import torch.nn.functional as F
-import librosa
-import matplotlib.pyplot as plt
-import cv2
+import random
+
 
 
 # tác dụng của 2 dòng này là để hiện thị toàn bộ dữ liệu trong dataframe nếu bạn k muốn có thể xóa 2 dòng dưới
@@ -56,10 +49,38 @@ test_df = test_df.drop(columns=['age', 'mmse', 'gender'], axis=1)
 train_df.columns = train_df.columns.str.strip()
 test_df.columns = test_df.columns.str.strip()
 
+
 train_ID = train_df['ID'].tolist()
 train_label = train_df['Label'].tolist()
+
+
+
+ad_ids = [id for id, label in zip(train_ID, train_label) if label == 1]  
+nad_ids = [id for id, label in zip(train_ID, train_label) if label == 0]
+
+random.seed(42)  # Đặt seed để có thể tái tạo kết quả
+val_ad_ids = random.sample(ad_ids, 15)
+val_nad_ids = random.sample(nad_ids, 15)
+
+val_ID = val_ad_ids + val_nad_ids
+val_label = [1] * 15 + [0] * 15
+
+train_ID_label = list(zip(train_ID, train_label))  # Gộp ID và label lại với nhau
+
+# Giữ lại chỉ những phần tử mà ID không nằm trong val_ID
+filtered_train = [(id, label) for id, label in train_ID_label if id not in val_ID]
+
+# Tách lại thành train_ID và train_label mới
+train_ID, train_label = zip(*filtered_train)
+train_ID = list(train_ID)
+train_label = list(train_label)
+
 test_ID = test_df['ID'].tolist()
 test_label = test_df['Label'].tolist()
+
+
+
+
 
 
 
