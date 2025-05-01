@@ -42,6 +42,7 @@ def get_audio_files_and_labels(dataset_path, split_folder_path, split):
     elif split == 'test':
         test_df = pd.read_csv(dataset_path + '/2020Labels.txt', delimiter=';', skipinitialspace=True)
         test_df = test_df.drop(columns=['age', 'mmse', 'gender'], axis=1)
+        test_df.columns = test_df.columns.str.strip()
         
         for folder in os.listdir(split_folder_path):
             folder_path = os.path.join(split_folder_path, folder)
@@ -151,6 +152,9 @@ class ADreSS2020Dataset(Dataset):
             # Prepare training data
             audio_data = []
             audio_labels = []
+
+            for file_path, label in zip(audio_files, labels):
+                load_and_augment_audio(file_path, label, audio_data, audio_labels)
 
             for batch_data, batch_labels in process_batches(audio_files, labels, batch_size=8):
                 # Process each batch (e.g., further pre-processing or saving results)
