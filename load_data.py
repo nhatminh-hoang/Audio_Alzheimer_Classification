@@ -47,11 +47,12 @@ class TorchDataDataset(Dataset):
             return self[random.randint(0, len(self) - 1)]
         
 
-def get_dataloaders(train_folder, test_folder, batch_size=4, num_workers=0):
+def get_dataloaders(train_folder, test_folder,val_folder, batch_size=4, num_workers=0):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Khởi tạo Dataset
     train_dataset = TorchDataDataset(train_folder, device=device)
+    val_dataset = TorchDataDataset(val_folder,device=device)
     test_dataset = TorchDataDataset(test_folder, device=device)
     
     # Khởi tạo DataLoader
@@ -62,7 +63,14 @@ def get_dataloaders(train_folder, test_folder, batch_size=4, num_workers=0):
         
         
     )
-    
+    val_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False # Không cần shuffle cho test
+        
+    )
+
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
@@ -70,18 +78,15 @@ def get_dataloaders(train_folder, test_folder, batch_size=4, num_workers=0):
         
     )
     
-    return train_loader, test_loader
+    return train_loader, val_loader,test_loader
 
 
 train_folder = r"D:\code\python\processed\train"
 test_folder = r"D:\code\python\processed\test"
+val_folder = r"D:\code\python\processed\val"
     
     # Lấy DataLoader
-train_loader, test_loader = get_dataloaders(
-        train_folder, 
-        test_folder,
-        batch_size=4
-    )
+train_loader,val_loader ,test_loader = get_dataloaders(train_folder ,val_folder , test_folder ,16)
     
     
 
