@@ -46,13 +46,13 @@ class CNNModel(nn.Module):
         """
         super(CNNModel, self).__init__()
         
-        # First Conv1d: input channels=1, output channels=64, kernel size=3
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=64, kernel_size=3)
+        # First Conv1d: input channels=1, output channels=32, kernel size=3
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=32, kernel_size=3)
         self.pool1 = nn.MaxPool1d(kernel_size=2)
         self.dropout1 = nn.Dropout(0.3)
         
-        # Second Conv1d: input channels=64, output channels=128, kernel size=3
-        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3)
+        # Second Conv1d: input channels=32, output channels=64, kernel size=3
+        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3)
         self.pool2 = nn.MaxPool1d(kernel_size=2)
         self.dropout2 = nn.Dropout(0.3)
         
@@ -68,9 +68,9 @@ class CNNModel(nn.Module):
         self.flattened_size = out.numel()
         
         # Fully connected layers
-        self.fc1 = nn.Linear(self.flattened_size, 128)
+        self.fc1 = nn.Linear(self.flattened_size, 64)
         self.dropout3 = nn.Dropout(0.4)
-        self.fc2 = nn.Linear(128, 1)
+        self.fc2 = nn.Linear(64, 1)
         
     def forward(self, x):
         # Expect input x of shape (batch_size, length)
