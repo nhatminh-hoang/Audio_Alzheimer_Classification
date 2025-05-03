@@ -2,23 +2,23 @@
 Layer (type:depth-idx)                   Output Shape              Param #
 ==========================================================================================
 CNNModel                                 [128, 1]                  --
-├─Conv1d: 1-1                            [128, 16, 11]             64
-├─MaxPool1d: 1-2                         [128, 16, 5]              --
-├─Dropout: 1-3                           [128, 16, 5]              --
-├─Conv1d: 1-4                            [128, 64, 3]              3,136
+├─Conv1d: 1-1                            [128, 32, 11]             128
+├─MaxPool1d: 1-2                         [128, 32, 5]              --
+├─Dropout: 1-3                           [128, 32, 5]              --
+├─Conv1d: 1-4                            [128, 64, 3]              6,208
 ├─MaxPool1d: 1-5                         [128, 64, 1]              --
 ├─Dropout: 1-6                           [128, 64, 1]              --
 ├─Linear: 1-7                            [128, 64]                 4,160
 ├─Dropout: 1-8                           [128, 64]                 --
 ├─Linear: 1-9                            [128, 1]                  65
 ==========================================================================================
-Total params: 7,425
-Trainable params: 7,425
+Total params: 10,561
+Trainable params: 10,561
 Non-trainable params: 0
-Total mult-adds (Units.MEGABYTES): 1.84
+Total mult-adds (Units.MEGABYTES): 3.10
 ==========================================================================================
 Input size (MB): 0.01
-Forward/backward pass size (MB): 0.44
-Params size (MB): 0.03
-Estimated Total Size (MB): 0.48
+Forward/backward pass size (MB): 0.62
+Params size (MB): 0.04
+Estimated Total Size (MB): 0.67
 ==========================================================================================

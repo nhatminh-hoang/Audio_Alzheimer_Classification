@@ -180,6 +180,8 @@ class ADreSS2020Dataset(Dataset):
                 features.append(mfccs)
 
             X = np.array(features)
+            # Normalize the features
+            X = (X - np.mean(X, axis=0)) / np.std(X, axis=0)
             y = np.array(segmented_labels)
             del features, segmented_data, segmented_labels
 
@@ -196,6 +198,8 @@ class ADreSS2020Dataset(Dataset):
                 features_test.append(mfccs)
 
             X = np.array(features_test)
+            # Normalize the features
+            X = (X - np.mean(X, axis=0)) / np.std(X, axis=0)
             y = segmented_test_labels
             del features_test, segmented_test_data, segmented_test_labels
 

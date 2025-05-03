@@ -39,22 +39,20 @@ class MLPModel(nn.Module):
         return x
 
 class CNNModel(nn.Module):
-    def __init__(self, input_length=13, *args, **kwargs):
+    def __init__(self, hidden_size, output_size, drop_out, input_length=13, *args, **kwargs):
         """
         Args:
             input_length (int): Length of the input sequence.
         """
         super(CNNModel, self).__init__()
         
-        # First Conv1d: input channels=1, output channels=32, kernel size=3
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=32, kernel_size=3)
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=hidden_size, kernel_size=3)
         self.pool1 = nn.MaxPool1d(kernel_size=2)
-        self.dropout1 = nn.Dropout(0.3)
+        self.dropout1 = nn.Dropout(drop_out)
         
-        # Second Conv1d: input channels=32, output channels=64, kernel size=3
-        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3)
+        self.conv2 = nn.Conv1d(in_channels=hidden_size, out_channels=hidden_size*2, kernel_size=3)
         self.pool2 = nn.MaxPool1d(kernel_size=2)
-        self.dropout2 = nn.Dropout(0.3)
+        self.dropout2 = nn.Dropout(drop_out)
         
         # To determine the flattened size after conv and pooling layers,
         # we use a dummy forward pass.
@@ -69,7 +67,7 @@ class CNNModel(nn.Module):
         
         # Fully connected layers
         self.fc1 = nn.Linear(self.flattened_size, 64)
-        self.dropout3 = nn.Dropout(0.4)
+        self.dropout3 = nn.Dropout(drop_out)
         self.fc2 = nn.Linear(64, 1)
         
     def forward(self, x):
@@ -255,7 +253,7 @@ class TransformerBlock(nn.Module):
         return x
 
 class TransformerModel(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, drop_out, seq_length=300, n_heads=4, n_layers=4):
+    def __init__(self, input_size, hidden_size, output_size, drop_out, seq_length=13, n_heads=4, n_layers=4):
         super(TransformerModel, self).__init__()
         self.emb = nn.Linear(input_size, hidden_size)
         self.layers = nn.ModuleList([TransformerBlock(hidden_size, hidden_size, hidden_size, drop_out, n_heads) 
