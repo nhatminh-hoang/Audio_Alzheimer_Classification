@@ -267,3 +267,161 @@ class TransformerModel(nn.Module):
             x = l(x)
         x = nn.Sigmoid()(self.fc(x.view(x.size(0), -1)))
         return x
+
+#-----------------------------------------------------------------------------
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ResidualBlock, self).__init__()
+        
+        self.conv_block = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(out_channels),
+            nn.GELU(),
+            nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(out_channels)
+        )
+        
+        # Skip connection (identity) nếu số kênh đầu vào và đầu ra giống nhau
+        self.skip = nn.Identity() if in_channels == out_channels else nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm1d(out_channels)
+        )
+        
+        self.activation = nn.GELU()
+    
+    def forward(self, x):
+        return self.activation(self.conv_block(x) + self.skip(x))
+
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        
+        self.conv = nn.Conv1d(2, 1, kernel_size=kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        # Tạo hai feature map theo chiều không gian
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        
+        # Nối hai feature map
+        attention = torch.cat([avg_out, max_out], dim=1)
+        
+        # Tính attention map
+        attention = self.conv(attention)
+        attention = self.sigmoid(attention)
+        
+        # Nhân attention map với đầu vào
+        return x * attention
+
+class ImprovedBinaryCNN(nn.Module):
+    def __init__(self, hidden_size, output_size, input_size=1, drop_out=0.5):
+        super(ImprovedBinaryCNN, self).__init__()
+        
+        self.input_bn = nn.BatchNorm1d(3)
+        #self.gap = nn.AdaptiveAvgPool2d((1, 1))
+        # 1. Sử dụng các block residual để cải thiện learning
+        self.conv1 = nn.Sequential(
+            nn.Conv1d(1, hidden_size, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(hidden_size),
+            nn.GELU(),
+        )
+        
+        # Residual Block 1
+        self.res_block1 = ResidualBlock(hidden_size, hidden_size)
+        
+        # Transition + Downsample
+        self.transition1 = nn.Sequential(
+            nn.Conv1d(hidden_size, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.GELU(),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Dropout(drop_out),
+        )
+        
+        # Residual Block 2
+        self.res_block2 = ResidualBlock(32, 32)
+        
+        # Transition + Downsample
+        self.transition2 = nn.Sequential(
+            nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Dropout(drop_out),
+        )
+        
+        # Residual Block 3
+        self.res_block3 = ResidualBlock(64, 64)
+        
+        # Transition + Downsample
+        self.transition3 = nn.Sequential(
+            nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.GELU(),
+            nn.MaxPool1d(kernel_size=2),
+            # nn.Dropout(drop_out),
+        )
+        
+        # 2. Spatial Attention
+        self.attention = SpatialAttention()
+        
+        # Tính toán kích thước đầu vào cho lớp tuyến tính
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, 13, input_size)
+            dummy_features = self._extract_features(dummy_input)
+            #dummy_features = self.gap(dummy_features) 
+            self._to_linear = dummy_features.view(1, -1).shape[1]
+        
+        # 3. Cải thiện classifier với batch normalization và dropout thích ứng
+        self.classifier = nn.Sequential(
+            nn.Linear(self._to_linear, 64, bias=False),
+            # nn.BatchNorm1d(128),
+            # nn.GELU(),
+            # nn.Dropout(drop_out),
+            # nn.Linear(128, 64, bias=False),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Dropout(drop_out * 0.5),  # Giảm dropout ở lớp cuối
+            nn.Linear(64, 1)
+        )
+        
+        # 4. Khởi tạo trọng số tốt hơn
+        self._initialize_weights()
+    
+    def _extract_features(self, x):
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        x = x.permute(0, 2, 1)
+        x = self.conv1(x)
+        x = self.res_block1(x)
+        x = self.transition1(x)
+        x = self.res_block2(x)
+        x = self.transition2(x)
+        x = self.res_block3(x)
+        # x = self.transition3(x)
+        x = self.attention(x)
+        return x
+    
+    def forward(self, x):
+        features = self._extract_features(x)
+        #features = self.gap(features)
+        features = features.view(features.size(0), -1)  # Flatten
+        output = self.classifier(features)
+        output = torch.sigmoid(output)
+        return output
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)

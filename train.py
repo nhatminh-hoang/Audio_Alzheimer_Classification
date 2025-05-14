@@ -15,8 +15,22 @@ MODEL = {
     'LSTM': LSTMModel,
     'BiLSTM': BiLSTMModel,
     'Transformer': TransformerModel,
+    'BiCNN': ImprovedBinaryCNN
 }
 
+class BCEWithLogitsLossWithLabelSmoothing(nn.Module):
+    def __init__(self, smoothing=0.1):
+        super().__init__()
+        self.smoothing = smoothing
+        self.bce_loss = nn.BCELoss()
+
+    def forward(self, output, target):
+        # Đảm bảo target là float (bắt buộc với BCEWithLogitsLoss)
+        target = target.float()
+        # Áp dụng label smoothing đúng chuẩn
+        smoothed_target = target * (1 - self.smoothing) + (1 - target) * self.smoothing
+        return self.bce_loss(output, smoothed_target)
+    
 def accuracy(output, label):
     if output.size(1) > 1:
         _, pred = torch.max(output, dim=1)
@@ -127,7 +141,7 @@ def evaluate(model, test_loader, criterion, flatten=False, device='cpu', name_ex
 
     # Metrics
     y_true, y_pred = [], []
-    
+
     with torch.no_grad():
         for waveform, label in test_loader:
             waveform, label = waveform.to(device), label.to(device)
@@ -139,7 +153,7 @@ def evaluate(model, test_loader, criterion, flatten=False, device='cpu', name_ex
             pred = torch.round(output)
             y_true.extend(label.cpu().numpy())
             y_pred.extend(pred.cpu().numpy())
-    
+    # print(y_pred)
     save_evaluation_metrics(y_true, y_pred, name_ex)
 
 def fit(name_ex, train_loader, val_loader, model, epochs, optimizer, criterion, learning_rate,
@@ -319,7 +333,7 @@ def main():
     elif config['optimizer'] == 'SGD':
         optimizer = optim.SGD(model.parameters(), lr=config['lr'])
 
-    criterion = nn.BCELoss()
+    criterion = BCEWithLogitsLossWithLabelSmoothing()
 
     # Checking the input_shape to the model
     # model_summary = summary(model, input_data=input_dummy, device='cpu')

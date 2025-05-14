@@ -2,23 +2,23 @@
 Layer (type:depth-idx)                   Output Shape              Param #
 ==========================================================================================
 CNNModel                                 [128, 1]                  --
-├─Conv1d: 1-1                            [128, 32, 11]             128
-├─MaxPool1d: 1-2                         [128, 32, 5]              --
-├─Dropout: 1-3                           [128, 32, 5]              --
-├─Conv1d: 1-4                            [128, 64, 3]              6,208
-├─MaxPool1d: 1-5                         [128, 64, 1]              --
-├─Dropout: 1-6                           [128, 64, 1]              --
-├─Linear: 1-7                            [128, 64]                 4,160
+├─Conv1d: 1-1                            [128, 128, 11]            512
+├─MaxPool1d: 1-2                         [128, 128, 5]             --
+├─Dropout: 1-3                           [128, 128, 5]             --
+├─Conv1d: 1-4                            [128, 256, 3]             98,560
+├─MaxPool1d: 1-5                         [128, 256, 1]             --
+├─Dropout: 1-6                           [128, 256, 1]             --
+├─Linear: 1-7                            [128, 64]                 16,448
 ├─Dropout: 1-8                           [128, 64]                 --
 ├─Linear: 1-9                            [128, 1]                  65
 ==========================================================================================
-Total params: 10,561
-Trainable params: 10,561
+Total params: 115,585
+Trainable params: 115,585
 Non-trainable params: 0
-Total mult-adds (Units.MEGABYTES): 3.10
+Total mult-adds (Units.MEGABYTES): 40.68
 ==========================================================================================
 Input size (MB): 0.01
-Forward/backward pass size (MB): 0.62
-Params size (MB): 0.04
-Estimated Total Size (MB): 0.67
+Forward/backward pass size (MB): 2.29
+Params size (MB): 0.46
+Estimated Total Size (MB): 2.76
 ==========================================================================================
