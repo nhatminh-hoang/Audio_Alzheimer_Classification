@@ -1,344 +1,458 @@
 import os
 import argparse
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.modules.batchnorm import _BatchNorm
+from torch.amp import autocast, GradScaler
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import pandas as pd
+from contextlib import nullcontext
+from model import *
+from torch.utils.data import TensorDataset, DataLoader, random_split
+from load_data import train_loader, val_loader, test_loader
+import random
+from sklearn.metrics import accuracy_score, classification_report, f1_score, roc_auc_score, roc_curve
+from sklearn.metrics import precision_recall_curve, average_precision_score
+import torch.nn.functional as F
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import math
 
-from models.base_model import *  # Import your model
-from data_preprocessing import *  # Import your data loading function
-from scripts.optimizer import *
+import torch
+import numpy as np
+from torch.optim import Optimizer
 
-MODEL = {
-    'MLP': MLPModel,
-    'CNN': CNNModel,
-    'LSTM': LSTMModel,
-    'BiLSTM': BiLSTMModel,
-    'Transformer': TransformerModel,
-}
+
+def set_seed(seed=42):
+    """Set seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # nếu dùng nhiều GPU
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def initialize_weights_with_seed(model, seed=42):
+    """Initialize model weights deterministically."""
+    torch.manual_seed(seed)
+    for m in model.modules():
+        if isinstance(m, (nn.Conv2d, nn.Conv3d, nn.Linear)):
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, _BatchNorm):
+            nn.init.constant_(m.weight, 1)
+            nn.init.constant_(m.bias, 0)
 
 def accuracy(output, label):
-    if output.size(1) > 1:
-        _, pred = torch.max(output, dim=1)
-        return torch.sum(pred == torch.argmax(label, dim=1)).item() / len(label)
-    else:
-        pred = torch.round(output)
-        return torch.sum(pred == label).item() / len(label)
-
-def get_lr(it, warmup_steps, max_step, max_lr=1e-3, min_lr=1e-5):
-    if it < warmup_steps:
-        lr = (max_lr - min_lr) / warmup_steps * it + min_lr
-        return lr
-    if it > max_step:
-        lr = min_lr
-        return lr
-    
-    decay_ratio = (it - warmup_steps) / (max_step - warmup_steps)
-    coeff = 0.5 * (1 + torch.cos(torch.tensor(decay_ratio) * np.pi))
-    lr = min_lr + (max_lr - min_lr) * coeff
-    return lr
-
-def disable_running_stats(model):
-    def _disable(module):
-        if isinstance(module, _BatchNorm):
-            module.backup_momentum = module.momentum
-            module.momentum = 0
-
-    model.apply(_disable)
-
-def enable_running_stats(model):
-    def _enable(module):
-        if isinstance(module, _BatchNorm) and hasattr(module, "backup_momentum"):
-            module.momentum = module.backup_momentum
-
-    model.apply(_enable)
-
-def training(dt_loader, model:nn.Module, optimizer:torch.optim.Optimizer, criterion:nn.Module, flatten=False, device='cpu'):
-    model.train()
-    model.training = True
-    losses = 0
-    acc = 0
-
-    for waveform, label in dt_loader:
-        waveform, label = waveform.to(device), label.to(device)
-        # One-hot encoding the label
-        # label = torch.nn.functional.one_hot(label, num_classes=2).float()
-        label = label.unsqueeze(-1).float()
-        optimizer.zero_grad()
-
-        if flatten:
-            waveform = waveform.view(waveform.size(0), -1)
-
-        
-        if optimizer.__class__.__name__ == 'SAM':
-            # first forward-backward step
-            enable_running_stats(model)
-            output = model(waveform)
-            loss = criterion(output, label)
-            loss.backward()
-            optimizer.first_step(zero_grad=True)
-
-            # second forward-backward step
-            disable_running_stats(model)
-            loss_2 = criterion(model(waveform), label)
-            loss_2.backward()
-            optimizer.second_step(zero_grad=True)
+    """Calculate accuracy between model output and labels."""
+    with torch.no_grad():
+        if output.size(1) > 1:
+            pred = output.argmax(dim=1)
+            true = label.argmax(dim=1) if label.ndim > 1 else label
         else:
+            pred = (output > 0.5).long().squeeze(1)
+            true = label.long().squeeze(1) if label.ndim > 1 else label
+
+        correct = (pred == true).sum().item()
+        total = true.size(0)
+        return correct / total if total > 0 else 0.0
+
+class BCEWithLogitsLossWithLabelSmoothing(nn.Module):
+    """BCE loss with label smoothing for better generalization."""
+    def __init__(self, smoothing=0.1):
+        super().__init__()
+        self.smoothing = smoothing
+        self.bce_loss = nn.BCEWithLogitsLoss()
+
+    def forward(self, output, target):
+        # Đảm bảo target là float (bắt buộc với BCEWithLogitsLoss)
+        target = target.float()
+        # Áp dụng label smoothing
+        smoothed_target = target * (1 - self.smoothing) + (1 - target) * self.smoothing
+        return self.bce_loss(output, smoothed_target)
+
+def train(model, train_loader, optimizer, criterion, device, scaler=None, scheduler=None):
+    """Train the model for one epoch."""
+    model.train()
+    running_loss = 0.0
+    running_acc = 0.0
+    total_samples = 0
+
+    use_autocast = scaler is not None
+    autocast_context = autocast(device_type='cuda', enabled=use_autocast)
+
+    data_iter = tqdm(train_loader, desc='Train', leave=False)
+
+    for waveform, label in data_iter:
+        waveform = waveform.to(device, non_blocking=True)
+        label = label.to(device, non_blocking=True)
+
+        batch_size = label.size(0)
+        if label.ndim == 1 or (label.ndim == 2 and label.size(1) == 1):
+            label = label.unsqueeze(-1).float()
+
+        optimizer.zero_grad(set_to_none=True)
+
+        with autocast_context:
             output = model(waveform)
             loss = criterion(output, label)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
             loss.backward()
             optimizer.step()
 
-        with torch.no_grad():
-            acc += accuracy(output, label)
-            losses += loss.cpu().detach().numpy()
+        if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler.step()
 
-    losses /= len(dt_loader)
-    acc /= len(dt_loader)
-    return losses, acc
+        acc = accuracy(output, label)
+        running_loss += loss.item() * batch_size
+        running_acc += acc * batch_size
+        total_samples += batch_size
 
-def testing(dt_loader, model, criterion:nn.Module, flatten=False, device='cpu'):
+        data_iter.set_postfix(loss=running_loss / total_samples, acc=running_acc / total_samples)
+
+    avg_loss = running_loss / total_samples
+    avg_acc = running_acc / total_samples
+    return avg_loss, avg_acc
+
+def validate(model, val_loader, device, criterion):
+    """Validate the model on validation set."""
     model.eval()
-    model.training = False
-    losses = 0
-    acc = 0
+    running_loss = 0.0
+    running_acc = 0.0
+    total_samples = 0
 
     with torch.no_grad():
-        for waveform, label in dt_loader:
-            waveform, label = waveform.to(device), label.to(device)
-            # One-hot encoding the label
-            # label = torch.nn.functional.one_hot(label, num_classes=2).float()
-            label = label.unsqueeze(-1).float()
-            if flatten:
-                waveform = waveform.view(waveform.size(0), -1)
+        for waveform, label in tqdm(val_loader, desc="Validation", leave=False):
+            waveform = waveform.to(device)
+            label = label.to(device)
+
+            if label.ndim == 1 or (label.ndim == 2 and label.size(1) == 1):
+                label = label.unsqueeze(-1).float()
+
+            batch_size = label.size(0)
             output = model(waveform)
-            losses += criterion(output, label).cpu().detach().numpy()
-            acc += accuracy(output, label)
 
-    losses /= len(dt_loader)
-    acc /= len(dt_loader)
-    return losses, acc
+            loss = criterion(output, label).item()
+            acc = accuracy(output, label)
 
-def evaluate(model, test_loader, criterion, flatten=False, device='cpu', name_ex='ADReSS2020_MLP_waveform'):
+            running_loss += loss * batch_size
+            running_acc += acc * batch_size
+            total_samples += batch_size
+
+    avg_loss = running_loss / total_samples
+    avg_acc = running_acc / total_samples
+    return avg_loss, avg_acc
+
+def test(model, dataloader, criterion, device, is_binary=False, class_names=None, save_dir="checkpoints"):
+    """Evaluate model on test set with detailed metrics."""
     model.eval()
-    model.training = False
-    test_loss, test_acc = testing(test_loader, model, criterion, flatten, device=device)
-    print(f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    all_probs = []
 
-    # Metrics
-    y_true, y_pred = [], []
-    
     with torch.no_grad():
-        for waveform, label in test_loader:
-            waveform, label = waveform.to(device), label.to(device)
-            if flatten:
-                waveform = waveform.view(waveform.size(0), -1)
-
-            output = model(waveform)
+        for inputs, labels in tqdm(dataloader, desc="Testing", leave=False):
+            inputs, labels = inputs.to(device), labels.to(device)
             
-            pred = torch.round(output)
-            y_true.extend(label.cpu().numpy())
-            y_pred.extend(pred.cpu().numpy())
-    
-    save_evaluation_metrics(y_true, y_pred, name_ex)
-
-def fit(name_ex, train_loader, val_loader, model, epochs, optimizer, criterion, learning_rate,
-        input_dummy, flatten, device='cpu', early_stop=5, USE_COMPILE=False):
-    train_losses, train_accs = [], []
-    val_losses, val_accs = [], []
-    lr_list = []
-    best_val_loss = float('inf')
-    early_stop_counter = 0
-    create_training_log(name_ex)
-    save_model_summary(model, input_data=input_dummy, log_name=name_ex)
-    model = model.to(device)
-
-    if USE_COMPILE:
-        try:
-            model = torch.compile(model)
-            print("Model successfully compiled")
-        except Exception as e:
-            print(f"Warning: Could not compile model: {e}")
-            print("Falling back to eager mode")
-    else:
-        print("Running in eager mode (torch.compile disabled)")
-
-    for epoch in range(epochs):
-        print('-'*50)
-        print(f"Epoch {epoch + 1}/{epochs}")
-        train_loss, train_acc = training(train_loader, model, optimizer, criterion, flatten, device=device)
-        val_loss, val_acc = testing(val_loader, model, criterion, flatten, device=device)
-
-        with torch.no_grad():
-            lr = get_lr(epoch, warmup_steps=epochs//100+5, max_step=epochs, max_lr=learning_rate, min_lr=learning_rate*1e-3)
-            lr_list.append(lr)
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
-
-            train_losses.append(train_loss)
-            train_accs.append(train_acc)
-            val_losses.append(val_loss)
-            val_accs.append(val_acc)
-            print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-            log_training(name_ex, epoch, train_loss, train_acc, val_loss, val_acc)
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save(model.state_dict(), SAVED_PATH + f'{name_ex}.pth')
-                early_stop_counter = 0
-                best_epoch = epoch
+            # Ensure correct label format for binary case
+            if is_binary and (labels.ndim == 1 or (labels.ndim == 2 and labels.size(1) == 1)):
+                labels = labels.unsqueeze(-1).float()
+            
+            outputs = model(inputs)
+            
+            # Handle loss calculation correctly for binary vs multiclass
+            if is_binary:
+                loss = criterion(outputs, labels)
+                probs = torch.sigmoid(outputs).squeeze()
+                preds = (probs >= 0.5).long()
+                all_probs.extend(probs.cpu().numpy())
             else:
-                early_stop_counter += 1
-                if early_stop_counter == early_stop:
-                    print(f"Early stopping at epoch {epoch + 1} | Best epoch: {best_epoch + 1}")
-                    break
-    
-    save_training_images(train_losses, train_accs, val_losses, val_accs, name_ex)
-    save_lr_plot(lr_list, name_ex)
-    print('-'*50)
-    print(f"Training completed. Save the model to {SAVED_PATH + name_ex}.pth")
+                loss = criterion(outputs, labels)
+                probs = F.softmax(outputs, dim=1)
+                preds = torch.argmax(probs, dim=1)
+                all_probs.extend(probs.cpu().numpy())
 
-def get_most_available_vram_device(fix_gpu=None):
-    try:
-        if fix_gpu is not None:
-            return torch.device(f"cuda:{fix_gpu}")
-    except:
-        print(f'GPU {fix_gpu} not found. Using the most available GPU instead.')
+            total_loss += loss.item() * inputs.size(0)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    # Ensure arrays are properly shaped
+    all_labels = np.array(all_labels).squeeze()
+    all_preds = np.array(all_preds).squeeze()
+    all_probs = np.array(all_probs)
     
-    available_vram = []
-    for i in range(torch.cuda.device_count()):
-        total_memory = torch.cuda.get_device_properties(i).total_memory
-        allocated_memory = torch.cuda.memory_allocated(i)
-        free_memory = total_memory - allocated_memory
-        available_vram.append((i, free_memory))
-        print(f"GPU {i}: {free_memory / 1024**3:.2f} GB free")
+    # Calculate metrics
+    avg_loss = total_loss / len(dataloader.dataset)
+    acc = accuracy_score(all_labels, all_preds)
     
-    best_gpu = max(available_vram, key=lambda x: x[1])[0]
-    return torch.device(f"cuda:{best_gpu}")
+    # F1 scores
+    f1_macro = f1_score(all_labels, all_preds, average='macro')
+    f1_micro = f1_score(all_labels, all_preds, average='micro')
+    f1_weighted = f1_score(all_labels, all_preds, average='weighted')
+
+    print(f"Test Loss: {avg_loss:.4f}")
+    print(f"Accuracy: {acc:.4f}")
+    print(f"F1 Macro: {f1_macro:.4f}")
+    print(f"F1 Micro: {f1_micro:.4f}")
+    print(f"F1 Weighted: {f1_weighted:.4f}")
+
+    # Classification report
+    print("\nClassification Report:")
+    report = classification_report(all_labels, all_preds, target_names=class_names if class_names else None, output_dict=True)
+    df_report = pd.DataFrame(report).transpose()
+    print(df_report)
+
+    # Save to CSV
+    os.makedirs(save_dir, exist_ok=True)
+    df_report.to_csv(f"{save_dir}/classification_report.csv")
+
+    # Confusion Matrix
+    cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=class_names if class_names else ["Class 0", "Class 1"],
+                yticklabels=class_names if class_names else ["Class 0", "Class 1"])
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig(f"{save_dir}/confusion_matrix.png")
+    plt.close()
+
+    # AUC-ROC curve for binary classification
+    if is_binary and len(np.unique(all_labels)) == 2:
+        try:
+            # Ensure shapes are correct for ROC calculation
+            if all_probs.ndim > 1 and all_probs.shape[1] > 1:
+                probs_for_roc = all_probs[:, 1]  # For multi-class, use prob of positive class
+            else:
+                probs_for_roc = all_probs
+                
+            auc_score = roc_auc_score(all_labels, probs_for_roc)
+            fpr, tpr, _ = roc_curve(all_labels, probs_for_roc)
+
+            print(f"\nAUC-ROC Score: {auc_score:.4f}")
+
+            plt.figure(figsize=(8, 6))
+            plt.plot(fpr, tpr, label=f"AUC = {auc_score:.4f}")
+            plt.plot([0, 1], [0, 1], linestyle='--', color='gray')
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.title('ROC Curve')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(f"{save_dir}/roc_curve.png")
+            plt.close()
+            
+            # Precision-Recall curve
+            precision, recall, _ = precision_recall_curve(all_labels, probs_for_roc)
+            avg_precision = average_precision_score(all_labels, probs_for_roc)
+            
+            plt.figure(figsize=(8, 6))
+            plt.plot(recall, precision, label=f"AP = {avg_precision:.4f}")
+            plt.xlabel('Recall')
+            plt.ylabel('Precision')
+            plt.title('Precision-Recall Curve')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(f"{save_dir}/precision_recall_curve.png")
+            plt.close()
+            
+            print(f"Average Precision Score: {avg_precision:.4f}")
+        except Exception as e:
+            print(f"Warning: Could not calculate ROC/PR curves: {e}")
+
+    return avg_loss, acc, f1_macro, f1_micro, f1_weighted
 
 def main():
-    # Device configuration
-    device = get_most_available_vram_device(0)
-    print(f"Using device: {device}")
+    # Set up
+    set_seed(42)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    if device.type == 'cuda':
-        # Check CUDA capability
-        if not torch.cuda.is_bf16_supported():
-            print("Warning: BF16 not supported on this GPU. Using FP32 instead.")
-            torch.set_float32_matmul_precision('high')
+    # Directory for checkpoints
+    save_dir = "checkpoints"
+    os.makedirs(save_dir, exist_ok=True)
     
-    # Suppress TorchDynamo errors to fall back to eager mode if compilation fails
-    torch._dynamo.config.suppress_errors = True
-
-    # Disable torch.compile if running on CPU or if CUDA capabilities are limited
-    USE_COMPILE = device.type == 'cuda' and torch.cuda.get_device_capability()[0] >= 10
-
-    # Getting arguments to create the new config 
-    parser = argparse.ArgumentParser(description='Train a model')
-    parser.add_argument('--data_name', type=str, help='Name of the dataset', default='ADReSS2020')
-    parser.add_argument('--data_type', type=str, help='Type of data', default='audio')
-    parser.add_argument('--text_type', type=str, help='Type of text', default='full')
-    parser.add_argument('--text_feature', type=str, help='Type of text feature', default='modernbert-base')
-    parser.add_argument('--wave_type', type=str, help='Type of waveform', default='full')
-    parser.add_argument('--audio_type', type=str, help='Use features {MFCC, LogmelDelta}', default='None')
-
-    parser.add_argument('--model', type=str, help='Model name')
-    parser.add_argument('--flatten', type=bool, help='Flatten the input', default=False)
-    parser.add_argument('--epochs', type=int, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, help='Batch size', default=128)
-    parser.add_argument('--lr', type=float, help='Learning rate', default=1e-2)
-    parser.add_argument('--output_size', type=int, default=2, help='Number of output classes')
-    parser.add_argument('--hidden_size', type=int, help='Hidden size', default=128)
-    parser.add_argument('--dropout', type=float, help='Dropout rate', default=0.5)
-    parser.add_argument('--early_stop', help='Early stopping', default=5)
-    parser.add_argument('--optimizer', type=str, help='Optimizer', default='AdamW')
+    # Initialize model
+    model = ImprovedBinaryCNN(hidden_size=16, drop_out=0.5).to(device)
+    initialize_weights_with_seed(model, seed=42)
     
-    args = parser.parse_args()
-
-    # Check if the model is valid
-    if args.model not in MODEL:
-        raise ValueError(f"Model {args.model} not found")
+    # Loss function, optimizer, scheduler
+    criterion = BCEWithLogitsLossWithLabelSmoothing(smoothing=0.1)
+    w = 0.03 * math.sqrt(16/780*100)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3,weight_decay= w)
     
-    # Check if the data_name is valid
-    if args.data_name not in ['ADReSS2020']:
-        raise ValueError(f"Dataset {args.data_name} not found")
+    # Scheduler options (choose one)
+    # Option 1: CosineAnnealing
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,T_0 =5,T_mult =2)
     
-    # If the early stop is not a number, set it to epochs
-    if not isinstance(args.early_stop, int):
-        args.early_stop = args.epochs
+    # Option 2: OneCycleLR (alternatively)
+    # total_steps = len(train_loader) * num_epochs
+    # scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-3, total_steps=total_steps)
+    
+    # Mixed precision training
+    scaler = GradScaler(device='cuda') if torch.cuda.is_available() else None
+    
+    # Training parameters
+    num_epochs = 100  # Reduced from 10000 to a more reasonable value
+    patience = 100
+    best_val_acc = 0.0
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    # Lists for tracking metrics
+    train_losses, val_losses, test_losses = [], [], []
+    train_accs, val_accs, test_accs = [], [], []
+    test_f1s = []
+    
+    # Training loop
+    for epoch in range(num_epochs):
+        print(f"\nEpoch {epoch+1}/{num_epochs}")
         
-    # Create config file from the arguments
-    audio_type = 'mfcc' if args.audio_type == 'MFCC' else 'mel_delta_delta2' if args.audio_type == 'LogmelDelta' else 'waveform'
-    text_name = 'text' + '_' + args.text_type + '_' + args.text_feature
-    audio_name = 'audio'+ '_' + args.wave_type + '_' + audio_type
-    type_name = text_name if args.data_type == 'text' else audio_name
-    name_ex = args.data_name + '_' + args.model + '_' + type_name +  '_' + args.optimizer + \
-              '_' + str(args.epochs) + 'epochs' + '_bs' + str(args.batch_size) + '_lr' + str(args.lr) + \
-              '_hs' + str(args.hidden_size) + '_do' + str(args.dropout)
-    name_config = name_ex + '.yaml'
-    config_path = './config/experiment_configs/' + name_config
+        # Train
+        train_loss, train_acc = train(model, train_loader, optimizer, criterion, device, scaler)
+        
+        # Validate
+        val_loss, val_acc = validate(model, val_loader, device, criterion)
+        
+        # Step scheduler (if not OneCycleLR which steps every batch)
+        if scheduler is not None and not isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler.step()
+        
+        # Print metrics
+        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
+        print(f"Val   Loss: {val_loss:.4f}, Val   Acc: {val_acc:.4f}")
+        
+        # Save metrics for plotting
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
+        val_losses.append(val_loss)
+        val_accs.append(val_acc)
+        
+        # Check best model criteria (based on lowest val_loss only)
+        is_best = False
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), f"{save_dir}/best_model.pth")
+            print(f"✅ Saved best model (Loss: {val_loss:.4f}, Acc: {val_acc:.4f})")
+            patience_counter = 0
+            is_best = True
+        else:
+            patience_counter += 1
+            print(f"⏳ EarlyStopping counter: {patience_counter}/{patience}")
+
+        # Optionally evaluate on test set when we have a new best model
+        if is_best:
+            print("\nEvaluating on test set:")
+            model.load_state_dict(torch.load(f"{save_dir}/best_model.pth"))
+            test_loss, test_acc, f1_macro, _, _ = test(
+                model, test_loader, criterion, device, 
+                is_binary=True, 
+                class_names=["Class 0", "Class 1"],
+                save_dir=save_dir
+            )
+            test_losses.append(test_loss)
+            test_accs.append(test_acc)
+            test_f1s.append(f1_macro)
+
+            # Save latest test metrics to all previous epochs (fill-in)
+            while len(test_losses) < len(train_losses):
+                test_losses.append(test_loss)
+                test_accs.append(test_acc)
+                test_f1s.append(f1_macro)
+
+        # Early stopping
+        if patience_counter >= patience:
+            print("🛑 Early stopping triggered.")
+            break
+
     
-    config = {}
-    for arg in vars(args):
-        config[arg] = getattr(args, arg)
-    create_config(config_path, config)
+    # Final evaluation on test set
+    print("\n=== Final Evaluation on Test Set ===")
+    model.load_state_dict(torch.load(f"{save_dir}/best_model.pth"))
+    test_loss, test_acc, f1_macro, f1_micro, f1_weighted = test(
+        model, test_loader, criterion, device,
+        is_binary=True,
+        class_names=["Class 0", "Class 1"],
+        save_dir=save_dir
+    )
     
-    print(config)
-    # Load data
-    train_loader, val_loader, test_loader = create_dataloader(data_type=config['data_type'],
-                                                              data_name=config['data_name'],
-                                                              wave_type=config['wave_type'],
-                                                              audio_feature_type=config['audio_type'],
-                                                              text_type=config['text_type'],
-                                                              text_feature_type=config['text_feature'],
-                                                              batch_size=config['batch_size'])
-    input_dummy = next(iter(train_loader))[0]
-    input_shape = input_dummy.shape
-    if config['flatten']:
-        input_size = input_shape[1]
-    else: 
-        input_size = input_shape[-1]
+    # Plot metrics
+    plot_training_history(
+        train_losses, val_losses, test_losses,
+        train_accs, val_accs, test_accs,
+        test_f1s,
+        save_dir
+    )
 
-    print(f"Input shape: {input_shape}")
-    print(f"Input size: {input_size}")
-    # import sys; sys.exit()
+def plot_training_history(train_losses, val_losses, test_losses, 
+                        train_accs, val_accs, test_accs,
+                        test_f1s, save_dir="checkpoints"):
+    """Plot and save training metrics history."""
+    # Make sure test metrics lists are the same length as training
+    if test_losses and len(test_losses) < len(train_losses):
+        last_test_loss = test_losses[-1]
+        last_test_acc = test_accs[-1]
+        last_test_f1 = test_f1s[-1]
+        
+        test_losses.extend([last_test_loss] * (len(train_losses) - len(test_losses)))
+        test_accs.extend([last_test_acc] * (len(train_accs) - len(test_accs)))
+        test_f1s.extend([last_test_f1] * (len(train_accs) - len(test_f1s)))
     
-    # Load model
-    model = MODEL[config['model']](input_size=input_size, hidden_size=config['hidden_size'], output_size=config['output_size'], drop_out=config['dropout'])
+    epochs = range(1, len(train_losses) + 1)
     
-    # Optimizer and criterion
-    if config['optimizer'] == 'AdamW':
-        optimizer = optim.AdamW(model.parameters(), lr=config['lr'])
-    elif config['optimizer'] == 'Adam':
-        optimizer = optim.Adam(model.parameters(), lr=config['lr'])
-    elif config['optimizer'] == 'SGD':
-        optimizer = optim.SGD(model.parameters(), lr=config['lr'])
-    elif config['optimizer'] == 'SAM':
-        base_optimizer = torch.optim.SGD 
-        optimizer = SAM(model.parameters(), base_optimizer=base_optimizer, momentum=0.9)
-    else:
-        raise ValueError(f"Optimizer {config['optimizer']} not found")
-
-    criterion = nn.BCELoss()
-
-    # Checking the input_shape to the model
-    # model_summary = summary(model, input_data=input_dummy, device='cpu')
-
-    # Train model
-    fit(name_ex, train_loader, val_loader, model, config['epochs'], optimizer, criterion, 
-        config['lr'], input_dummy, flatten=config['flatten'], device=device, early_stop=config['early_stop'],
-        USE_COMPILE=USE_COMPILE)
-
-    # Test model
-    name_model = name_ex + '.pth'
-    path_model = SAVED_PATH + name_model
-    print(f"Load model from {path_model}")
-    state_dict = torch.load(SAVED_PATH + f'{name_ex}.pth', weights_only=False)
-    # Remove the '_orig_mod.' prefix from keys
-    clean_state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-    model.load_state_dict(clean_state_dict)
-    model.to(device)
-    evaluate(model, test_loader, criterion, flatten=config['flatten'], device=device, name_ex=name_ex)
+    plt.figure(figsize=(18, 6))
+    
+    # Loss plot
+    plt.subplot(1, 3, 1)
+    plt.plot(epochs, train_losses, 'b-', label='Train Loss')
+    plt.plot(epochs, val_losses, 'r-', label='Val Loss')
+    if test_losses:
+        plt.plot(epochs, test_losses, 'g--', label='Test Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Accuracy plot
+    plt.subplot(1, 3, 2)
+    plt.plot(epochs, train_accs, 'b-', label='Train Acc')
+    plt.plot(epochs, val_accs, 'r-', label='Val Acc')
+    if test_accs:
+        plt.plot(epochs, test_accs, 'g--', label='Test Acc')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # F1 Score plot
+    plt.subplot(1, 3, 3)
+    if test_f1s:
+        plt.plot(epochs, test_f1s, 'purple', label='Test F1')
+        plt.xlabel('Epoch')
+        plt.ylabel('F1 Score')
+        plt.title('Test F1 Score')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f"{save_dir}/training_metrics_plot.png")
+    plt.close()
+    
+    print(f"📊 Training history plots saved to {save_dir}/training_metrics_plot.png")
 
 if __name__ == "__main__":
     main()
